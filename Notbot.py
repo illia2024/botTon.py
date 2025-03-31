@@ -4,7 +4,7 @@ import os
 from datetime import datetime, timedelta
 
 # Вставте ваш токен бота
-TOKEN = '7909956325:AAHhd9WKiyfmHUT7g2AnMxIgVHp6Gup-M30'
+TOKEN = '7591171707:AAHqWzEb0p6ZU_Kqb5NT4jQBOSD4mJMe-Zo'
 BASE_URL = f'https://api.telegram.org/bot{TOKEN}'
 
 # ID адміністратора
