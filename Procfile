@@ -1,1 +1,1 @@
-web: python path/to/botTon.py
+web: python botTon.py
