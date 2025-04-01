@@ -1,1 +1,1 @@
-web: python botTon.py
+python /workspace/botTon.py
