@@ -1,1 +1,1 @@
-python /workspace/botTon.py
+worker: python3 botTon.py
