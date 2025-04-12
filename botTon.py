@@ -1,207 +1,169 @@
-import requests
+import logging
+from aiogram import Bot, Dispatcher, types
+from aiogram.utils import executor
+from datetime import datetime, timedelta
 import json
 import os
-from datetime import datetime, timedelta
+import psutil
+import asyncio
 
-# Вставте ваш токен бота
-TOKEN = '7591171707:AAHqWzEb0p6ZU_Kqb5NT4jQBOSD4mJMe-Zo'
-BASE_URL = f'https://api.telegram.org/bot{TOKEN}'
+API_TOKEN = '7800722038:AAFHllfItmbgQXh_CmDUrBgfpQzDw7f-678'
+ADMIN_ID = 8089612452  # ваш ID для отримання звітів
+DATA_FILE = 'bot_data.json'  # Файл для збереження даних
 
-# ID адміністратора
-ADMIN_ID = '1428115542'
-DEVELOPER_USERNAME = 'xxqwer_x'
+logging.basicConfig(level=logging.INFO)
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher(bot)
 
-# Словники для відстеження станів
-user_state = {}
-blocked_users = {}
-admin_reply_state = {}
-user_bots = {}
+# Ініціалізація глобальних змінних
+bot_status = {
+    'start_date': datetime.now(),
+    'uptime': timedelta(),
+    'memory_usage': 0,  # Використання пам'яті
+    'active_users': 0,
+    'groups': {}
+}
 
-# Завантаження стану блокування з файлу
-if os.path.exists("blocked_users.json"):
-    with open("blocked_users.json", "r") as file:
-        blocked_users = json.load(file)
+# Обмеження для медіа
+MEDIA_LIMITS = {
+    'photo': 5,
+    'video': 2
+}
 
-# Завантаження інформації про ботів користувачів
-if os.path.exists("user_bots.json"):
-    with open("user_bots.json", "r") as file:
-        user_bots = json.load(file)
+# Перевірка останнього запуску бота
+def check_bot_uptime():
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, 'r') as f:
+            data = json.load(f)
+            last_start = datetime.fromisoformat(data.get('start_date'))
+            if datetime.now() - last_start > timedelta(days=3):  # Якщо більше 3 діб без перезапуску
+                return True
+    return False
 
-# Функція для надсилання повідомлень
-def send_message(chat_id, text, reply_markup=None):
-    url = f'{BASE_URL}/sendMessage'
-    payload = {
-        'chat_id': chat_id,
-        'text': text,
-        'parse_mode': 'HTML'
-    }
-    if reply_markup:
-        payload['reply_markup'] = reply_markup
-    requests.post(url, json=payload)
+# Функція для оновлення статистики про пам'ять
+def update_memory_usage():
+    memory = psutil.virtual_memory()
+    bot_status['memory_usage'] = round(memory.used / (1024 ** 2), 2)  # Перетворюємо байти в MB
 
-# Функція для збереження стану блокування
-def save_blocked_users():
-    with open("blocked_users.json", "w") as file:
-        json.dump(blocked_users, file)
+# Функція для збереження даних
+def save_data():
+    with open(DATA_FILE, 'w') as f:
+        json.dump({
+            'start_date': bot_status['start_date'].isoformat(),
+            'uptime': str(bot_status['uptime']),
+            'memory_usage': bot_status['memory_usage'],
+            'active_users': bot_status['active_users'],
+            'groups': bot_status['groups']
+        }, f)
 
-# Функція для збереження інформації про ботів користувачів
-def save_user_bots():
-    with open("user_bots.json", "w") as file:
-        json.dump(user_bots, file)
+# Функція для створення звіту для адміністратора
+async def send_status_report():
+    update_memory_usage()  # Оновлення статистики пам'яті
+    uptime_str = str(bot_status['uptime']).split(".")[0]
+    report = f"""
+    BOT STATUS REPORT
 
-# Функція для створення кнопок для адміністратора
-def generate_admin_buttons(user_id):
-    block_text = "🔓 Розблокувати" if blocked_users.get(user_id) else "🚫 Заблокувати"
-    block_callback = f'unblock_{user_id}' if blocked_users.get(user_id) else f'block_{user_id}'
-    return {
-        'inline_keyboard': [
-            [{'text': '✅ Відповісти', 'callback_data': f'reply_{user_id}'}, {'text': block_text, 'callback_data': block_callback}]
-        ]
-    }
+    ⏳ Аптайм: {uptime_str}
+    📅 Дата запуску: {bot_status['start_date'].strftime('%d.%m.%Y %H:%M')}
+    🧠 Пам'ять: {bot_status['memory_usage']} MB
+    🧮 Кількість об'єктів у БД: {len(bot_status['groups'])}
+    📊 Активних користувачів: {bot_status['active_users']}
 
-# Функція для автоматичного видалення бота
-def delete_inactive_bots():
-    now = datetime.now()
-    activity_timeout = timedelta(days=2)
-    for user_id, bot_info in list(user_bots.items()):
-        last_active = datetime.fromisoformat(bot_info['last_active'])
-        if now - last_active > activity_timeout:
-            del user_bots[user_id]
-            save_user_bots()
-            send_message(user_id, 'Ваш бот був видалений через відсутність активності протягом 2 днів.')
+    🗂 Групи під керуванням:
+    """
 
-# Обробник запитів
-def handle_update(update):
-    message = update.get('message', {})
-    text = message.get('text', '')
-    chat_id = message.get('chat', {}).get('id')
+    total_deleted = 0  # Загальна кількість видаленого контенту
 
-    # Обробка кнопок адміністратора
-    callback_data = update.get('callback_query', {}).get('data')
-    if callback_data:
-        callback_query_id = update['callback_query']['id']
-        from_id = update['callback_query']['from']['id']
+    for group_id, group_data in bot_status['groups'].items():
+        group_report = f"""
+        {group_data['name']} | ID: {group_id}
+        - Користувачів у ліміті: {group_data['user_limit']}
+        - Всього повідомлень оброблено: {group_data['messages_processed']}
+        - Видалено фото: {group_data['deleted']['photo']} | відео: {group_data['deleted']['video']} | посилань: {group_data['deleted']['links']} | спаму: {group_data['deleted']['spam']}
+        """
+        report += group_report
+        total_deleted += sum(group_data['deleted'].values())
 
-        if callback_data.startswith("reply_"):
-            user_id = int(callback_data.split("_")[1])
-            admin_reply_state[from_id] = user_id
-            send_message(from_id, 'Введіть вашу відповідь, і я надішлю її користувачу.')
+    report += f"""
+    🔐 Загальна статистика:
+    - Загальна кількість груп: {len(bot_status['groups'])}
+    - Загальна кількість користувачів з лімітами: {bot_status['active_users']}
+    - Всього заблоковано контенту: {total_deleted}
 
-        elif callback_data.startswith("block_"):
-            user_id = int(callback_data.split("_")[1])
-            blocked_users[user_id] = True
-            save_blocked_users()
-            send_message(from_id, 'Користувача заблоковано.', generate_admin_buttons(user_id))
+    🛠 Технічне:
+    - Версія Python: 3.11.8
+    - aiogram: 3.4.1
+    - Платформа: Linux x86_64
+    - Перезапуск через: {str(bot_status['uptime']).split(".")[0]}
+    - Автоматичне очищення лімітів: Увімкнено
 
-        elif callback_data.startswith("unblock_"):
-            user_id = int(callback_data.split("_")[1])
-            blocked_users.pop(user_id, None)
-            save_blocked_users()
-            send_message(from_id, 'Користувача розблоковано.', generate_admin_buttons(user_id))
+    ⚠️ Якщо бот не активний більше 3 діб — аптайм обнуляється, ліміти скидаються.
+    """
 
-        return
+    await bot.send_message(ADMIN_ID, report)
 
-    # Якщо адміністратор у режимі відповіді
-    if chat_id == int(ADMIN_ID) and chat_id in admin_reply_state:
-        target_user = admin_reply_state.pop(chat_id)
-        send_message(target_user, f'Відповідь від адміністратора: {text}')
-        send_message(chat_id, 'Відповідь надіслано користувачу.')
+# Функція для перевірки медіа та обмежень
+async def check_media(message: types.Message):
+    user_id = message.from_user.id
+    media_type = None
 
-    # Якщо користувач натиснув "⚡Написати"
-    elif text == '⚡Написати':
-        if blocked_users.get(chat_id):
-            send_message(chat_id, 'Вибачте, але ви заблоковані і не можете надсилати повідомлення.')
-            return
+    if message.photo:
+        media_type = 'photo'
+    elif message.video:
+        media_type = 'video'
 
-        user_state[chat_id] = 'waiting_for_message'
-        send_message(chat_id, 'Напишіть ваше повідомлення, і я надішлю його адміністратору.')
+    if media_type:
+        user_data = user_limits.get(user_id, {'photo': 0, 'video': 0, 'last_reset': datetime.now()})
+        limit = MEDIA_LIMITS[media_type]
+        
+        if user_data[media_type] >= limit:
+            await message.delete()
+            await message.answer(f"🚫 Ви перевищили ліміт на {media_type}. Спробуйте пізніше.")
+        else:
+            user_data[media_type] += 1
+            if datetime.now() - user_data['last_reset'] > timedelta(days=1):
+                user_data[media_type] = 0
+                user_data['last_reset'] = datetime.now()
+            user_limits[user_id] = user_data
 
-    # Якщо користувач натиснув "Анонімне повідомлення"
-    elif text == 'Анонімне повідомлення':
-        if blocked_users.get(chat_id):
-            send_message(chat_id, 'Вибачте, але ви заблоковані і не можете надсилати повідомлення.')
-            return
+# Обробка повідомлень
+@dp.message_handler(content_types=['text', 'photo', 'video', 'document', 'url'])
+async def handle_message(message: types.Message):
+    group_id = message.chat.id
 
-        user_state[chat_id] = 'waiting_for_anonymous_message'
-        send_message(chat_id, 'Напишіть ваше повідомлення, і я надішлю його адміністратору анонімно.')
-
-    # Якщо користувач у режимі "Написати"
-    elif user_state.get(chat_id) == 'waiting_for_message':
-        send_message(ADMIN_ID, f'Повідомлення від користувача @{message["chat"].get("username", "невідомий")}:\n\n{text}', generate_admin_buttons(chat_id))
-        send_message(chat_id, '✨Повідомлення надіслано')
-        user_state[chat_id] = None
-
-    # Якщо користувач у режимі "Анонімне повідомлення"
-    elif user_state.get(chat_id) == 'waiting_for_anonymous_message':
-        send_message(ADMIN_ID, f'Анонімне повідомлення:\n\n{text}', generate_admin_buttons(chat_id))
-        send_message(chat_id, '✨Анонімне повідомлення надіслано')
-        user_state[chat_id] = None
-
-    # Команда "🖇️ІнФо"
-    elif text == '🖇️ІнФо':
-        info_text = "🖇️ІнФо\n〰️〰️〰️〰️〰️〰️〰️〰️\n📌Старт бота: 30.10.2024 року"
-        send_message(chat_id, info_text)
-
-    # Команда "⚙️Хочу такого самого бота"
-    elif text == '⚙️Хочу такого самого бота':
-        send_message(chat_id, f'Перейдіть в чат із розробником: @{DEVELOPER_USERNAME}')
-
-    # Команда для створення нового бота
-    elif text.startswith('/create_my_bot'):
-        user_state[chat_id] = 'waiting_for_bot_token'
-        send_message(chat_id, 'Введіть токен вашого бота.')
-
-    # Якщо користувач вводить токен
-    elif user_state.get(chat_id) == 'waiting_for_bot_token':
-        token = text
-        user_state[chat_id] = 'waiting_for_user_id'
-        user_bots[chat_id] = {
-            'token': token,
-            'username': message.get('chat', {}).get('username'),
-            'last_active': datetime.now().isoformat()
+    if group_id not in bot_status['groups']:
+        bot_status['groups'][group_id] = {
+            'name': message.chat.title,
+            'user_limit': 5,  # За замовчуванням ліміт 5 користувачів
+            'messages_processed': 0,
+            'deleted': {'photo': 0, 'video': 0, 'links': 0, 'spam': 0}
         }
-        save_user_bots()
-        send_message(chat_id, 'Токен прийнято. Тепер введіть ваш ID.')
 
-    # Якщо користувач вводить свій ID
-    elif user_state.get(chat_id) == 'waiting_for_user_id':
-        user_id = text
-        user_bots[chat_id]['user_id'] = user_id
-        save_user_bots()
-        send_message(chat_id, f'⚙️Бот створено в: @{message.get("chat", {}).get("username")}\n'
-                              f'🔸Бот створено для зв\'язку із @{DEVELOPER_USERNAME}')
-        user_state[chat_id] = None
+    group_data = bot_status['groups'][group_id]
+    group_data['messages_processed'] += 1
 
-    # Головне меню для команди /start
-    elif text == '/start':
-        main_menu(chat_id)
+    if message.text:
+        if 'http' in message.text or 'www' in message.text:
+            await message.delete()
+            group_data['deleted']['links'] += 1
+            save_data()  # Збереження після кожної операції
+            return
 
-# Головне меню з кнопками
-def main_menu(chat_id):
-    reply_markup = {
-        'keyboard': [
-            [{'text': '⚡Написати'}, {'text': 'Анонімне повідомлення'}, {'text': '🖇️ІнФо'}],
-            [{'text': '⚙️Хочу такого самого бота'}]
-        ],
-        'resize_keyboard': True,
-        'one_time_keyboard': True
-    }
-    welcome_text = "🔸Бот створено для зв'язку із @xxqwer_x"
-    send_message(chat_id, welcome_text, reply_markup=reply_markup)
+    await check_media(message)
+    save_data()  # Збереження після кожної операції
 
-# Основна функція для запуску бота
-def main():
-    # Перевірка наявності нових оновлень
-    last_update_id = None
-    while True:
-        updates = requests.get(f'{BASE_URL}/getUpdates?offset={last_update_id}').json()
-        for update in updates['result']:
-            handle_update(update)
-            last_update_id = update['update_id'] + 1
+# Команда для адміністратора
+@dp.message_handler(commands=['bot'])
+async def bot_status(message: types.Message):
+    if message.from_user.id == ADMIN_ID:
+        await send_status_report()
 
-        # Періодичне видалення неактивних ботів
-        delete_inactive_bots()
-
-# Запуск бота
+# Старт бота
 if __name__ == '__main__':
-    main()
+    # Якщо більше 3 діб бездіяльності, скидаємо статистику
+    if check_bot_uptime():
+        bot_status['start_date'] = datetime.now()
+        bot_status['uptime'] = timedelta()
+
+    save_data()  # Збереження даних
+    executor.start_polling(dp, skip_updates=True
